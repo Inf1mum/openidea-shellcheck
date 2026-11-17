@@ -1,0 +1,38 @@
+id = "inf1mum.shellcheck"
+name = "ShellCheck"
+version = "0.1.0"
+description = "Checks shell scripts with ShellCheck when you save them: problems in the editor and the Problems view, ShellCheck's own suggestions as quick fixes, and installation notes when the binary is missing."
+authors = ["Inf1mum"]
+license = "Apache-2.0"
+change-notes = "0.1.0 — first release: check on save (a newer save cancels the running check), ShellCheck's JSON report as diagnostics with SC codes, quick fixes where ShellCheck carries one, a minimum-severity filter, exclude globs, extra ShellCheck arguments, and installation notes when the binary is missing."
+categories = ["linters"]
+engines.openidea = "^1.4"
+wasm = "dist/plugin.wasm"
+# The checks run when a shell script is saved; the commands (check now,
+# installation notes) activate the plugin too.
+activation = ["on-event:file-saved", "on-command:*"]
+
+[capabilities]
+# `process:shellcheck`: the `shellcheck` command line (e.g. `brew install
+# shellcheck`). The IDE pins the binary when the permission is allowed.
+# storage: remembers the day the user was last told the binary looks missing,
+# so saving never spams the notice.
+required = ["project.read", "events", "storage", "process:shellcheck"]
+
+[[contributes.providers]]
+kinds = ["code-actions"]
+languages = ["shellscript"]
+
+[[contributes.commands]]
+id = "check"
+title = "ShellCheck: Check Current File"
+category = "ShellCheck"
+
+[[contributes.commands]]
+id = "install-notes"
+title = "ShellCheck: Show Installation Notes"
+category = "ShellCheck"
+
+[contributes.settings]
+title = "ShellCheck"
+schema = "settings.schema.json"
