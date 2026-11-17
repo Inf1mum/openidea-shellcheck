@@ -148,7 +148,7 @@ pub fn at_least(severity: Severity, floor: Severity) -> bool {
 }
 
 /// The `extraArgs` setting: extra command-line arguments for shellcheck
-/// (e.g. `--enable=all`), passed after `-f json` and before the file.
+/// (e.g. `--enable=all`), passed after `-f json1` and before the file.
 fn extra_args() -> Vec<String> {
     host::setting("extraArgs")
         .and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok())
@@ -156,16 +156,21 @@ fn extra_args() -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// ShellCheck's JSON report (`shellcheck -f json <file>`)
+// ShellCheck's JSON report (`shellcheck -f json1 <file>`)
 // ---------------------------------------------------------------------------
 
-/// One ShellCheck replacement: a half-open range of the file (0-based
-/// code-point offsets) and the text to put there.
+/// One ShellCheck replacement: the half-open range of the file to overwrite
+/// with `replacement` (0-based code-point line and column; a zero-width range
+/// inserts).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Replacement {
-    pub start: usize,
-    pub end: usize,
-    pub insertion: String,
+    /// 0-based.
+    pub line: u32,
+    pub column: u32,
+    /// 0-based (`endLine`/`endColumn` of the report, 1-based there).
+    pub end_line: u32,
+    pub end_column: u32,
+    pub replacement: String,
 }
 
 /// One reported problem.
@@ -214,9 +219,15 @@ struct RawFix {
 
 #[derive(Deserialize)]
 struct RawReplacement {
-    start: usize,
-    end: usize,
-    insertion: String,
+    /// 1-based.
+    line: u32,
+    #[serde(default, rename = "endLine")]
+    end_line: Option<u32>,
+    /// 1-based.
+    column: u32,
+    #[serde(default, rename = "endColumn")]
+    end_column: Option<u32>,
+    replacement: String,
 }
 
 /// ShellCheck's level → the host's severity (`style` is a hint; an unknown
@@ -230,12 +241,19 @@ fn severity_of(level: &str) -> Severity {
     }
 }
 
-/// Problems from ShellCheck's `-f json` report (`[`…`]`), 1-based line and
-/// column numbers turned 0-based.
+/// The enclosing `comments` object of ShellCheck's `-f json1` report.
+#[derive(Deserialize)]
+struct RawReport {
+    comments: Vec<RawProblem>,
+}
+
+/// Problems from ShellCheck's `-f json1` report (the `comments` array of
+/// `{"comments": [ … ]}`), 1-based line and column numbers turned 0-based.
 pub fn parse_report(json: &str) -> Result<Vec<Problem>, Error> {
-    let raw: Vec<RawProblem> =
+    let raw: RawReport =
         serde_json::from_str(json).map_err(|e| Error::Failed(format!("shellcheck: unreadable report: {e}")))?;
     Ok(raw
+        .comments
         .into_iter()
         .map(|p| Problem {
             file: p.file,
@@ -250,7 +268,13 @@ pub fn parse_report(json: &str) -> Result<Vec<Problem>, Error> {
                 (!f.replacements.is_empty()).then(|| {
                     f.replacements
                         .into_iter()
-                        .map(|r| Replacement { start: r.start, end: r.end, insertion: r.insertion })
+                        .map(|r| Replacement {
+                            line: r.line.saturating_sub(1),
+                            column: r.column.saturating_sub(1),
+                            end_line: r.end_line.unwrap_or(r.line).saturating_sub(1),
+                            end_column: r.end_column.unwrap_or(r.column).saturating_sub(1),
+                            replacement: r.replacement,
+                        })
                         .collect()
                 })
             }),
@@ -295,25 +319,12 @@ pub fn utf16_column(line: &str, column: u32) -> u32 {
     units
 }
 
-/// The (line, UTF-16 column) of a 0-based code-point offset in `text`
-/// (`None` when the offset is past the end).
-pub fn position_of_offset(text: &str, offset: usize) -> Option<Position> {
-    let mut line = 0u32;
-    let mut character = 0u32;
-    let mut seen = 0usize;
-    for c in text.chars() {
-        if seen == offset {
-            return Some(Position::new(line, character));
-        }
-        if c == '\n' {
-            line += 1;
-            character = 0;
-        } else {
-            character += c.len_utf16() as u32;
-        }
-        seen += 1;
-    }
-    (seen == offset).then_some(Position::new(line, character))
+/// The editor position of a 0-based code-point (line, column) in `text`
+/// (`None` when the line or the column is past the end — a report that no
+/// longer fits the document must not move text).
+pub fn position_of(text: &str, line: u32, column: u32) -> Option<Position> {
+    let line_text = text.split('\n').nth(line as usize)?;
+    (column as usize <= line_text.chars().count()).then(|| Position::new(line, utf16_column(line_text, column)))
 }
 
 /// The problem as an editor diagnostic: code-point columns become UTF-16
@@ -413,7 +424,7 @@ impl ShellCheck {
         let project = project_of(path).ok_or_else(|| Error::NotFound(format!("{path} is not in an open project")))?;
         let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
         let task = host::begin_task(&format!("ShellCheck: {name}"), true);
-        let mut args = vec!["-f".to_owned(), "json".into()];
+        let mut args = vec!["-f".to_owned(), "json1".into()];
         args.extend(extra_args());
         args.push(path.to_owned());
         let out = project.run_process("shellcheck", &args, None)?;
@@ -473,9 +484,9 @@ impl Providers for ShellCheck {
             let mut edits = Vec::new();
             let mut applicable = true;
             for r in fix {
-                match (position_of_offset(&doc.text, r.start), position_of_offset(&doc.text, r.end)) {
+                match (position_of(&doc.text, r.line, r.column), position_of(&doc.text, r.end_line, r.end_column)) {
                     (Some(start), Some(end)) if start <= end => {
-                        edits.push(TextEdit { range: Range::new(start, end), text: r.insertion.clone() });
+                        edits.push(TextEdit { range: Range::new(start, end), text: r.replacement.clone() });
                     }
                     _ => {
                         applicable = false; // the document drifted off the report
@@ -559,61 +570,86 @@ mod tests {
     /// with the variable at code points 42..49 of the file.
     const SCRIPT: &str = "#!/usr/bin/env bash\nset -e\nTARGET=$1\necho $TARGET\necho done\n";
 
-    /// A report in the shape ShellCheck 0.8–0.10 prints with `-f json`
-    /// (levels error/warning/info/style; the last entry is another file;
-    /// the style entry carries no fix).
-    const REPORT: &str = r#"[
+    /// A report in the shape ShellCheck 0.11.0 prints with `-f json1`, captured
+    /// from the real binary (only the `file` paths are renamed to the mock
+    /// project): SC2086 carries its fix as two zero-width quote insertions,
+    /// SC1010 and SC1089 carry none, and the last entry is another file's.
+    const REPORT: &str = r#"{"comments": [
     {
         "file": "/project/src/deploy.sh",
         "line": 4,
         "endLine": 4,
         "column": 6,
         "endColumn": 13,
-        "level": "warning",
+        "level": "info",
         "code": 2086,
         "message": "Double quote to prevent globbing and word splitting.",
         "fix": {
-            "replacements": [ { "start": 42, "end": 49, "insertion": "\"$TARGET\"" } ]
+            "replacements": [
+                { "column": 6, "endColumn": 6, "endLine": 4, "insertionPoint": "afterEnd", "line": 4, "precedence": 7, "replacement": "\"" },
+                { "column": 13, "endColumn": 13, "endLine": 4, "insertionPoint": "beforeStart", "line": 4, "precedence": 7, "replacement": "\"" }
+            ]
         }
-    },
-    {
-        "file": "/project/src/deploy.sh",
-        "line": 3,
-        "endLine": 3,
-        "column": 1,
-        "endColumn": 11,
-        "level": "error",
-        "code": 2155,
-        "message": "Declare and assign separately to avoid masking return values."
     },
     {
         "file": "/project/src/deploy.sh",
         "line": 5,
         "endLine": 5,
+        "column": 6,
+        "endColumn": 6,
+        "level": "warning",
+        "code": 1010,
+        "message": "Use semicolon or linefeed before 'done' (or quote to make it literal).",
+        "fix": null
+    },
+    {
+        "file": "/project/src/deploy.sh",
+        "line": 2,
+        "endLine": 2,
         "column": 1,
-        "endColumn": 10,
-        "level": "style",
-        "code": 1090,
-        "message": "Try adding a shebang."
+        "endColumn": 1,
+        "level": "error",
+        "code": 1089,
+        "message": "Parsing stopped here. Is this keyword correctly matched up?",
+        "fix": null
     },
     {
         "file": "/project/src/other.sh",
-        "line": 1,
-        "endLine": 1,
-        "column": 1,
-        "endColumn": 5,
-        "level": "info",
-        "code": 1091,
-        "message": "Not following: other.sh."
+        "line": 3,
+        "endLine": 3,
+        "column": 4,
+        "endColumn": 6,
+        "level": "style",
+        "code": 2004,
+        "message": "$/${} is unnecessary on arithmetic variables.",
+        "fix": null
     }
-]"#;
+]}"#;
+
+    /// The tab-indented script ShellCheck 0.11.0 reports SC2059 on, and the
+    /// `-f json1` report the real binary prints for it (columns 9..16: with
+    /// `json1` a tab counts as one character).
+    const TABBED_SCRIPT: &str = "#!/bin/sh\n\tprintf \"$USER\"\n";
+    const TABBED_REPORT: &str = r#"{"comments": [
+    {
+        "file": "/project/src/tabbed.sh",
+        "line": 2,
+        "endLine": 2,
+        "column": 9,
+        "endColumn": 16,
+        "level": "info",
+        "code": 2059,
+        "message": "Don't use variables in the printf format string. Use printf '..%s..' \"$foo\".",
+        "fix": null
+    }
+]}"#;
 
     fn report_host() -> MockHost {
         let host = MockHost::install()
             .with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
         host.add_file("src/deploy.sh", SCRIPT);
         host.on_process("shellcheck", |args, _| {
-            assert_eq!(&args[..3], ["-f", "json", "/project/src/deploy.sh"]);
+            assert_eq!(&args[..3], ["-f", "json1", "/project/src/deploy.sh"]);
             Ok(ProcessOutput { status: Some(1), stdout: REPORT.into(), stderr: String::new() })
         });
         host
@@ -626,24 +662,29 @@ mod tests {
         let quoted = &r[0];
         assert_eq!(quoted.file, "/project/src/deploy.sh");
         assert_eq!(quoted.code, "SC2086");
-        assert_eq!(quoted.severity, Severity::Warning);
+        assert_eq!(quoted.severity, Severity::Info);
         assert_eq!((quoted.line, quoted.column, quoted.end_line, quoted.end_column), (3, 5, 3, 12));
         assert_eq!(quoted.message, "Double quote to prevent globbing and word splitting.");
         assert_eq!(
             quoted.fix,
-            Some(vec![Replacement { start: 42, end: 49, insertion: "\"$TARGET\"".into() }])
+            Some(vec![
+                Replacement { line: 3, column: 5, end_line: 3, end_column: 5, replacement: "\"".into() },
+                Replacement { line: 3, column: 12, end_line: 3, end_column: 12, replacement: "\"".into() },
+            ]),
+            "the fix's two zero-width quote insertions, as ShellCheck reports them"
         );
-        assert_eq!((r[1].severity, r[1].code.as_str()), (Severity::Error, "SC2155"));
+        assert_eq!((r[1].severity, r[1].code.as_str()), (Severity::Warning, "SC1010"));
         assert_eq!(r[1].fix, None, "no fix, no replacement");
-        assert_eq!(r[2].severity, Severity::Hint, "style is a hint");
-        assert_eq!(r[3].severity, Severity::Info);
+        assert_eq!(r[2].severity, Severity::Error);
+        assert_eq!((r[2].line, r[2].column, r[2].end_line, r[2].end_column), (1, 0, 1, 0));
+        assert_eq!(r[3].severity, Severity::Hint, "style is a hint");
         assert!(r[3].fix.is_none());
     }
 
     #[test]
     fn a_report_without_fixes_or_ends_still_parses() {
         let r = parse_report(
-            r#"[{"file": "a.sh", "line": 2, "column": 3, "level": "warning", "code": 2086, "message": "m"}]"#,
+            r#"{"comments": [{"file": "a.sh", "line": 2, "column": 3, "level": "warning", "code": 2086, "message": "m"}]}"#,
         )
         .expect("a report");
         assert_eq!(r.len(), 1);
@@ -651,6 +692,28 @@ mod tests {
         assert_eq!(r[0].fix, None);
         assert!(parse_report("not json").is_err());
         assert!(parse_report("").is_err(), "no output is a failure, not a clean file");
+        assert!(parse_report("[]").is_err(), "the legacy `-f json` array is not the json1 report");
+        assert!(parse_report(r#"{"comments": []}"#).is_ok_and(|r| r.is_empty()), "an empty report is a clean file");
+    }
+
+    #[test]
+    fn a_tab_indented_line_publishes_its_real_range() {
+        let host = MockHost::install()
+            .with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
+        host.add_file("src/tabbed.sh", TABBED_SCRIPT);
+        host.on_process("shellcheck", |_, _| {
+            Ok(ProcessOutput { status: Some(1), stdout: TABBED_REPORT.into(), stderr: String::new() })
+        });
+        let mut p = ShellCheck::default();
+        p.handle_events(&[Event::FileSaved("/project/src/tabbed.sh".into())], &host.invocation());
+        let d = &host.diagnostics()["/project/src/tabbed.sh"];
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].code.as_deref(), Some("SC2059"));
+        assert_eq!(
+            d[0].range,
+            Range::new(Position::new(1, 8), Position::new(1, 15)),
+            "the tab counts as one character, not as a stop of 8"
+        );
     }
 
     #[test]
@@ -689,17 +752,17 @@ mod tests {
     }
 
     #[test]
-    fn code_point_columns_become_utf16() {
-        assert_eq!(utf16_column("abc", 1), 1);
-        assert_eq!(utf16_column("abc", 99), 3, "past the end clamps to the line");
-        assert_eq!(utf16_column("😀x", 1), 2, "one astral code point is two UTF-16 units");
-        assert_eq!(utf16_column("😀x", 2), 3);
+    fn code_point_positions_become_utf16() {
+        assert_eq!(position_of("abc", 0, 1), Some(Position::new(0, 1)));
+        assert_eq!(position_of("abc", 0, 3), Some(Position::new(0, 3)), "the end of the line resolves");
+        assert_eq!(position_of("abc", 0, 99), None, "a column past the line does not resolve");
+        assert_eq!(position_of("😀x", 0, 1), Some(Position::new(0, 2)), "one astral code point is two UTF-16 units");
+        assert_eq!(position_of("😀x", 0, 2), Some(Position::new(0, 3)));
         let text = "ab\nc😀\n";
-        assert_eq!(position_of_offset(text, 0), Some(Position::new(0, 0)));
-        assert_eq!(position_of_offset(text, 3), Some(Position::new(1, 0)));
-        assert_eq!(position_of_offset(text, 5), Some(Position::new(1, 3)), "at the newline after 😀");
-        assert_eq!(position_of_offset(text, 6), Some(Position::new(2, 0)), "the end of the text");
-        assert_eq!(position_of_offset(text, 7), None, "past the end");
+        assert_eq!(position_of(text, 1, 0), Some(Position::new(1, 0)));
+        assert_eq!(position_of(text, 1, 2), Some(Position::new(1, 3)), "the astral character is two units");
+        assert_eq!(position_of(text, 2, 0), Some(Position::new(2, 0)), "the empty last line");
+        assert_eq!(position_of(text, 3, 0), None, "a line past the end does not resolve");
     }
 
     #[test]
@@ -757,14 +820,20 @@ mod tests {
         assert_eq!(host.process_runs().len(), 1, "only shell scripts");
         assert_eq!(host.process_runs()[0].cwd.as_deref(), Some("/project"));
         let d = &host.diagnostics()["/project/src/deploy.sh"];
-        assert_eq!(d.len(), 3, "warning, error and style; the other file's info entry is not ours");
+        assert_eq!(d.len(), 3, "info, warning and error; the other file's style entry is not ours");
         assert_eq!(d[0].code.as_deref(), Some("SC2086"));
         assert_eq!(d[0].range, Range::new(Position::new(3, 5), Position::new(3, 12)));
-        assert_eq!(d[1].severity, Severity::Error);
+        assert_eq!(d[1].severity, Severity::Warning);
+        assert_eq!(
+            d[1].range,
+            Range::new(Position::new(4, 5), Position::new(4, 6)),
+            "the zero-width span widens to one character so it still squiggles"
+        );
+        assert_eq!(d[2].severity, Severity::Error);
         assert!(host.tasks()[0].ended, "the cancellable task is done");
 
-        // The quick fix comes from ShellCheck's own replacement (42..49, the
-        // `echo $TARGET` line), applied as one edit.
+        // The quick fix comes from ShellCheck's own replacements (two
+        // zero-width quote insertions around `$TARGET`), applied as two edits.
         let doc = Document {
             path: "/project/src/deploy.sh".into(),
             language: "shellscript".into(),
@@ -775,9 +844,12 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].title, "ShellCheck: apply fix for SC2086");
         assert_eq!(actions[0].edits[0].0, "/project/src/deploy.sh");
-        let edit = &actions[0].edits[0].1[0];
-        assert_eq!(edit.range, Range::new(Position::new(3, 5), Position::new(3, 12)));
-        assert_eq!(edit.text, "\"$TARGET\"");
+        let edits = &actions[0].edits[0].1;
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].range, Range::new(Position::new(3, 5), Position::new(3, 5)));
+        assert_eq!(edits[0].text, "\"");
+        assert_eq!(edits[1].range, Range::new(Position::new(3, 12), Position::new(3, 12)));
+        assert_eq!(edits[1].text, "\"");
         // A selection on the error line (no fix) offers nothing.
         let actions = p.code_actions(&doc, Range::new(Position::new(2, 0), Position::new(2, 0)));
         assert!(actions.is_empty());
@@ -793,7 +865,7 @@ mod tests {
         p.handle_events(&[Event::FileSaved("/project/src/deploy.sh".into())], &host.invocation());
         assert_eq!(host.diagnostics()["/project/src/deploy.sh"].len(), 3);
         host.on_process("shellcheck", |_, _| {
-            Ok(ProcessOutput { status: Some(0), stdout: "[]".into(), stderr: String::new() })
+            Ok(ProcessOutput { status: Some(0), stdout: r#"{"comments": []}"#.into(), stderr: String::new() })
         });
         p.handle_events(&[Event::FileSaved("/project/src/deploy.sh".into())], &host.invocation());
         assert!(!host.diagnostics().contains_key("/project/src/deploy.sh"), "a clean run clears the squiggles");
@@ -807,7 +879,7 @@ mod tests {
         let mut p = ShellCheck::default();
         p.handle_events(&[Event::FileSaved("/project/src/deploy.sh".into())], &host.invocation());
         let d = &host.diagnostics()["/project/src/deploy.sh"];
-        assert_eq!(d.len(), 2, "the style hint is dropped, error and warning stay");
+        assert_eq!(d.len(), 2, "the info entry is dropped, error and warning stay");
         host.set_setting("minSeverity", "\"error\"");
         p.handle_events(&[Event::FileSaved("/project/src/deploy.sh".into())], &host.invocation());
         let d = &host.diagnostics()["/project/src/deploy.sh"];
@@ -825,7 +897,7 @@ mod tests {
         host.add_file("src/deploy.sh", SCRIPT);
         host.add_file("vendor/dep/setup.sh", SCRIPT);
         host.on_process("shellcheck", |_, _| {
-            Ok(ProcessOutput { status: Some(0), stdout: "[]".into(), stderr: String::new() })
+            Ok(ProcessOutput { status: Some(0), stdout: r#"{"comments": []}"#.into(), stderr: String::new() })
         });
         host.set_setting("exclude", r#"["**/vendor/**"]"#);
         let mut p = ShellCheck::default();
@@ -932,8 +1004,8 @@ mod tests {
             .with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
         host.add_file("src/a.sh", SCRIPT);
         host.on_process("shellcheck", |args, _| {
-            assert_eq!(args, &["-f", "json", "--enable=all", "-e", "SC1091", "/project/src/a.sh"]);
-            Ok(ProcessOutput { status: Some(0), stdout: "[]".into(), stderr: String::new() })
+            assert_eq!(args, &["-f", "json1", "--enable=all", "-e", "SC1091", "/project/src/a.sh"]);
+            Ok(ProcessOutput { status: Some(0), stdout: r#"{"comments": []}"#.into(), stderr: String::new() })
         });
         host.set_setting("extraArgs", r#"["--enable=all", "-e", "SC1091"]"#);
         ShellCheck::default().handle_events(&[Event::FileSaved("/project/src/a.sh".into())], &host.invocation());

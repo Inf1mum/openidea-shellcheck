@@ -11,7 +11,7 @@ suggestions available as quick fixes.
 - **Check on save.** Saving a shell script (`.sh`, `.bash`, `.zsh`, `.ksh`,
   `.ash`, `.dash`, `.bats`, `.command`, and the usual rc/profile/PKGBUILD file
   names — the same files OpenIDEA's *shellscript* language covers) runs
-  `shellcheck -f json` on it as a cancellable task; a newer save cancels the
+  `shellcheck -f json1` on it as a cancellable task; a newer save cancels the
   running check.
 - **Diagnostics.** The JSON report becomes editor diagnostics with the `SC…`
   code on each: ShellCheck's `error`, `warning`, `info` and `style` levels map
@@ -104,7 +104,7 @@ The plugin depends on the
 (pinned to tag `v0.1.46`) and builds for `wasm32-wasip2`. The unit tests cover
 the JSON report parsing (real ShellCheck output shapes, missing fix/end
 fields), severity mapping and the minimum-severity filter, exclude globs,
-code-point → UTF-16 column and offset mapping, diagnostic range clamping,
+code-point → UTF-16 position mapping, diagnostic range clamping,
 report-path matching (including Windows shapes), the check-on-save wiring,
 quick fixes, the extra-args plumbing, the clean-report clearing, and the
 graceful degradation paths (permission denied, vanished binary, broken
