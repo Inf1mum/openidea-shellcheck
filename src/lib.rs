@@ -567,14 +567,50 @@ mod tests {
     use openidea_plugin::mock::MockHost;
 
     /// The script the wiring tests check: `echo $TARGET` on line 3 (0-based),
-    /// with the variable at code points 42..49 of the file.
-    const SCRIPT: &str = "#!/usr/bin/env bash\nset -e\nTARGET=$1\necho $TARGET\necho done\n";
+    /// with the variable at code points 42..49 of the file, and the stray
+    /// `done` that ShellCheck reports SC1010 and SC1089 on.
+    const SCRIPT: &str = "#!/usr/bin/env bash\nset -e\nTARGET=$1\necho $TARGET\necho done\ndone\n";
 
     /// A report in the shape ShellCheck 0.11.0 prints with `-f json1`, captured
-    /// from the real binary (only the `file` paths are renamed to the mock
-    /// project): SC2086 carries its fix as two zero-width quote insertions,
-    /// SC1010 and SC1089 carry none, and the last entry is another file's.
+    /// from the real binary in one run over two files (`deploy.sh` above plus
+    /// `src/other.sh` containing `echo $(($x + 1))`; only the `file` paths are
+    /// renamed to the mock project): SC2086 carries its fix as two zero-width
+    /// quote insertions, the stray `done` produces SC1010 and SC1089 without
+    /// one, and `other.sh`'s entries must not leak into deploy.sh's result.
     const REPORT: &str = r#"{"comments": [
+    {
+        "file": "/project/src/other.sh",
+        "line": 1,
+        "endLine": 1,
+        "column": 1,
+        "endColumn": 1,
+        "level": "error",
+        "code": 2148,
+        "message": "Tips depend on target shell and yours is unknown. Add a shebang or a 'shell' directive.",
+        "fix": null
+    },
+    {
+        "file": "/project/src/other.sh",
+        "line": 1,
+        "endLine": 1,
+        "column": 9,
+        "endColumn": 11,
+        "level": "warning",
+        "code": 2154,
+        "message": "x is referenced but not assigned.",
+        "fix": null
+    },
+    {
+        "file": "/project/src/other.sh",
+        "line": 1,
+        "endLine": 1,
+        "column": 9,
+        "endColumn": 11,
+        "level": "style",
+        "code": 2004,
+        "message": "$/${} is unnecessary on arithmetic variables.",
+        "fix": null
+    },
     {
         "file": "/project/src/deploy.sh",
         "line": 4,
@@ -604,24 +640,13 @@ mod tests {
     },
     {
         "file": "/project/src/deploy.sh",
-        "line": 2,
-        "endLine": 2,
+        "line": 6,
+        "endLine": 6,
         "column": 1,
         "endColumn": 1,
         "level": "error",
         "code": 1089,
         "message": "Parsing stopped here. Is this keyword correctly matched up?",
-        "fix": null
-    },
-    {
-        "file": "/project/src/other.sh",
-        "line": 3,
-        "endLine": 3,
-        "column": 4,
-        "endColumn": 6,
-        "level": "style",
-        "code": 2004,
-        "message": "$/${} is unnecessary on arithmetic variables.",
         "fix": null
     }
 ]}"#;
@@ -658,8 +683,8 @@ mod tests {
     #[test]
     fn parses_shellcheck_json() {
         let r = parse_report(REPORT).expect("a report");
-        assert_eq!(r.len(), 4);
-        let quoted = &r[0];
+        assert_eq!(r.len(), 6);
+        let quoted = &r[3];
         assert_eq!(quoted.file, "/project/src/deploy.sh");
         assert_eq!(quoted.code, "SC2086");
         assert_eq!(quoted.severity, Severity::Info);
@@ -673,12 +698,13 @@ mod tests {
             ]),
             "the fix's two zero-width quote insertions, as ShellCheck reports them"
         );
-        assert_eq!((r[1].severity, r[1].code.as_str()), (Severity::Warning, "SC1010"));
-        assert_eq!(r[1].fix, None, "no fix, no replacement");
-        assert_eq!(r[2].severity, Severity::Error);
-        assert_eq!((r[2].line, r[2].column, r[2].end_line, r[2].end_column), (1, 0, 1, 0));
-        assert_eq!(r[3].severity, Severity::Hint, "style is a hint");
-        assert!(r[3].fix.is_none());
+        assert_eq!((r[4].severity, r[4].code.as_str()), (Severity::Warning, "SC1010"));
+        assert_eq!(r[4].fix, None, "no fix, no replacement");
+        assert_eq!((r[5].severity, r[5].code.as_str()), (Severity::Error, "SC1089"));
+        assert_eq!((r[5].line, r[5].column, r[5].end_line, r[5].end_column), (5, 0, 5, 0));
+        assert_eq!(r[2].severity, Severity::Hint, "style is a hint");
+        assert!(r[2].fix.is_none());
+        assert_eq!(r[0].severity, Severity::Error, "the other file's error maps like ours do");
     }
 
     #[test]
@@ -820,7 +846,7 @@ mod tests {
         assert_eq!(host.process_runs().len(), 1, "only shell scripts");
         assert_eq!(host.process_runs()[0].cwd.as_deref(), Some("/project"));
         let d = &host.diagnostics()["/project/src/deploy.sh"];
-        assert_eq!(d.len(), 3, "info, warning and error; the other file's style entry is not ours");
+        assert_eq!(d.len(), 3, "info, warning and error; the other file's entries are not ours");
         assert_eq!(d[0].code.as_deref(), Some("SC2086"));
         assert_eq!(d[0].range, Range::new(Position::new(3, 5), Position::new(3, 12)));
         assert_eq!(d[1].severity, Severity::Warning);
