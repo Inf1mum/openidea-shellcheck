@@ -107,9 +107,7 @@ fn file_name(path: &str) -> &str {
 
 /// The `exclude` globs, as the user set them (default: none).
 fn excluded_globs() -> Vec<String> {
-    host::setting("exclude")
-        .and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok())
-        .unwrap_or_default()
+    host::setting("exclude").and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok()).unwrap_or_default()
 }
 
 fn is_excluded(path: &str, globs: &[String]) -> bool {
@@ -150,9 +148,7 @@ pub fn at_least(severity: Severity, floor: Severity) -> bool {
 /// The `extraArgs` setting: extra command-line arguments for shellcheck
 /// (e.g. `--enable=all`), passed after `-f json1` and before the file.
 fn extra_args() -> Vec<String> {
-    host::setting("extraArgs")
-        .and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok())
-        .unwrap_or_default()
+    host::setting("extraArgs").and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok()).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +341,8 @@ fn diagnostic(p: &Problem, text: &str) -> Diagnostic {
     );
     if end <= start {
         let len = line_len(start_line);
-        end = if start.character < len { Position::new(p.line, start.character + 1) } else { Position::new(p.line, len) };
+        end =
+            if start.character < len { Position::new(p.line, start.character + 1) } else { Position::new(p.line, len) };
     }
     let range = Range::new(start, end.max(start));
     Diagnostic::new(range, p.severity, p.message.clone()).code(p.code.clone())
@@ -670,8 +667,7 @@ mod tests {
 ]}"#;
 
     fn report_host() -> MockHost {
-        let host = MockHost::install()
-            .with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
+        let host = MockHost::install().with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
         host.add_file("src/deploy.sh", SCRIPT);
         host.on_process("shellcheck", |args, _| {
             assert_eq!(&args[..3], ["-f", "json1", "/project/src/deploy.sh"]);
@@ -724,8 +720,7 @@ mod tests {
 
     #[test]
     fn a_tab_indented_line_publishes_its_real_range() {
-        let host = MockHost::install()
-            .with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
+        let host = MockHost::install().with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
         host.add_file("src/tabbed.sh", TABBED_SCRIPT);
         host.on_process("shellcheck", |_, _| {
             Ok(ProcessOutput { status: Some(1), stdout: TABBED_REPORT.into(), stderr: String::new() })
@@ -754,8 +749,16 @@ mod tests {
     #[test]
     fn shell_files_are_recognized_by_name() {
         for path in [
-            "/p/deploy.sh", "C:\\p\\x.BASH", "/p/run.zsh", "/p/ci.bats", "/p/a.command", "/p/.bashrc",
-            "/p/.zshenv", "/p/PKGBUILD", "/p/.envrc", "/p/APKBUILD",
+            "/p/deploy.sh",
+            "C:\\p\\x.BASH",
+            "/p/run.zsh",
+            "/p/ci.bats",
+            "/p/a.command",
+            "/p/.bashrc",
+            "/p/.zshenv",
+            "/p/PKGBUILD",
+            "/p/.envrc",
+            "/p/APKBUILD",
         ] {
             assert!(is_shell_script(path), "{path}");
         }
@@ -918,8 +921,7 @@ mod tests {
 
     #[test]
     fn excluded_paths_are_not_checked() {
-        let host = MockHost::install()
-            .with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
+        let host = MockHost::install().with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
         host.add_file("src/deploy.sh", SCRIPT);
         host.add_file("vendor/dep/setup.sh", SCRIPT);
         host.on_process("shellcheck", |_, _| {
@@ -940,8 +942,7 @@ mod tests {
 
     #[test]
     fn non_shell_saves_run_nothing() {
-        let host = MockHost::install()
-            .with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
+        let host = MockHost::install().with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
         let mut p = ShellCheck::default();
         p.handle_events(
             &[
@@ -980,8 +981,7 @@ mod tests {
 
     #[test]
     fn a_vanished_binary_is_a_friendly_notice_once_a_day() {
-        let host = MockHost::install()
-            .with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
+        let host = MockHost::install().with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
         host.add_file("src/a.sh", SCRIPT);
         // What the host answers when the approved binary is gone from PATH.
         host.on_process("shellcheck", |_, _| {
@@ -1006,8 +1006,7 @@ mod tests {
 
     #[test]
     fn a_broken_report_is_a_failure_not_a_crash() {
-        let host = MockHost::install()
-            .with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
+        let host = MockHost::install().with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
         host.add_file("src/a.sh", SCRIPT);
         host.on_process("shellcheck", |_, _| {
             Ok(ProcessOutput {
@@ -1026,8 +1025,7 @@ mod tests {
 
     #[test]
     fn extra_args_land_between_the_format_and_the_file() {
-        let host = MockHost::install()
-            .with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
+        let host = MockHost::install().with_capabilities(&["project.read", "events", "storage", "process:shellcheck"]);
         host.add_file("src/a.sh", SCRIPT);
         host.on_process("shellcheck", |args, _| {
             assert_eq!(args, &["-f", "json1", "--enable=all", "-e", "SC1091", "/project/src/a.sh"]);
