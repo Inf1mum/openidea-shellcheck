@@ -1,6 +1,6 @@
 id = "inf1mum.shellcheck"
 name = "ShellCheck"
-version = "0.1.0"
+version = "0.1.1"
 description = "Checks shell scripts with ShellCheck when you save them: problems in the editor and the Problems view, ShellCheck's own suggestions as quick fixes, and installation notes when the binary is missing."
 authors = ["Inf1mum"]
 license = "Apache-2.0"
